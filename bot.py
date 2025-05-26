@@ -1,5 +1,6 @@
 import os
 import threading
+import asyncio
 from flask import Flask
 import discord
 import requests
@@ -10,7 +11,7 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-TELEGRAM_CHANNEL = os.getenv('TELEGRAM_CHANNEL')  # Should be like -1001234567890
+TELEGRAM_CHANNEL = os.getenv('TELEGRAM_CHANNEL')  # e.g., -1001234567890
 DISCORD_CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
 PORT = int(os.getenv('PORT', 10000))
 
@@ -24,7 +25,7 @@ def home():
 def run_flask():
     app.run(host='0.0.0.0', port=PORT)
 
-# Setup Discord client
+# Setup Discord client with intents to read messages
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
@@ -55,7 +56,7 @@ async def on_ready():
     print(f'Listening on Discord Channel ID: {DISCORD_CHANNEL_ID}')
     print(f'Forwarding to Telegram Channel ID: {TELEGRAM_CHANNEL}')
     
-    # Telegram startup message
+    # Send startup message to Telegram
     try:
         send_text_to_telegram(
             "<b>✅ Bot Started Successfully!</b>\n"
@@ -66,7 +67,7 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Failed to send Telegram startup message: {e}")
     
-    # Discord startup message
+    # Send startup message to Discord channel
     try:
         channel = client.get_channel(DISCORD_CHANNEL_ID)
         if channel:
@@ -76,41 +77,69 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Failed to send Discord startup message: {e}")
 
-@client.event
-async def on_message(message):
-    if message.author == client.user:
-        return
+# Track last message ID to avoid duplicates
+last_message_id = None
 
-    if message.channel.id == DISCORD_CHANNEL_ID:
-        author = message.author.name
-        text = message.content or ""
-        caption = f"<b>{author}</b>:\n{text}" if text else f"<b>{author}</b>"
+async def cronjob_forwarder():
+    global last_message_id
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            channel = client.get_channel(DISCORD_CHANNEL_ID)
+            if not channel:
+                print("❌ Discord channel not found during cronjob.")
+                await asyncio.sleep(300)
+                continue
 
-        if message.attachments:
-            for i, attachment in enumerate(message.attachments):
-                try:
-                    if attachment.content_type and attachment.content_type.startswith('image'):
-                        img_bytes = await attachment.read()
-                        cap = caption if i == 0 else ""
-                        resp = send_photo_to_telegram(img_bytes, cap)
+            # Fetch messages after last processed message ID
+            if last_message_id:
+                messages = await channel.history(limit=10, after=discord.Object(id=last_message_id)).flatten()
+            else:
+                messages = await channel.history(limit=10).flatten()
+
+            messages = sorted(messages, key=lambda m: m.id)  # oldest first
+
+            for message in messages:
+                if message.author == client.user:
+                    continue  # skip bot's own messages
+
+                author = message.author.name
+                text = message.content or ""
+                caption = f"<b>{author}</b>:\n{text}" if text else f"<b>{author}</b>"
+
+                if message.attachments:
+                    for i, attachment in enumerate(message.attachments):
+                        try:
+                            if attachment.content_type and attachment.content_type.startswith('image'):
+                                img_bytes = await attachment.read()
+                                cap = caption if i == 0 else ""
+                                resp = send_photo_to_telegram(img_bytes, cap)
+                                if resp.status_code != 200:
+                                    print(f"❌ Failed to send image: {resp.text}")
+                            else:
+                                link_text = f"{caption}\n{attachment.url}" if i == 0 and text else attachment.url
+                                resp = send_text_to_telegram(link_text)
+                                if resp.status_code != 200:
+                                    print(f"❌ Failed to send file/link: {resp.text}")
+                        except Exception as e:
+                            print(f"❌ Error processing attachment: {e}")
+                elif text:
+                    try:
+                        resp = send_text_to_telegram(caption)
                         if resp.status_code != 200:
-                            print(f"❌ Failed to send image: {resp.text}")
-                    else:
-                        link_text = f"{caption}\n{attachment.url}" if i == 0 and text else attachment.url
-                        resp = send_text_to_telegram(link_text)
-                        if resp.status_code != 200:
-                            print(f"❌ Failed to send file/link: {resp.text}")
-                except Exception as e:
-                    print(f"❌ Error processing attachment: {e}")
-        elif text:
-            try:
-                resp = send_text_to_telegram(caption)
-                if resp.status_code != 200:
-                    print(f"❌ Failed to send text message: {resp.text}")
-            except Exception as e:
-                print(f"❌ Error sending text message: {e}")
+                            print(f"❌ Failed to send text message: {resp.text}")
+                    except Exception as e:
+                        print(f"❌ Error sending text message: {e}")
 
-# Start Flask + Discord bot
+                last_message_id = message.id
+
+        except Exception as e:
+            print(f"❌ Error in cronjob loop: {e}")
+
+        await asyncio.sleep(300)  # Poll every 5 minutes
+
+# Start Flask + Discord bot + cronjob
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
+    client.loop.create_task(cronjob_forwarder())
     client.run(DISCORD_TOKEN)
