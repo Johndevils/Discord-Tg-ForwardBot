@@ -1,5 +1,6 @@
 import os
 import threading
+import asyncio
 from flask import Flask, jsonify
 import discord
 import requests
@@ -15,22 +16,29 @@ PORT = int(os.getenv('PORT', 10000))
 
 app = Flask(__name__)
 
+# In-memory store for new messages to forward
+pending_messages = []
+
 @app.route('/')
 def home():
     return '✅ Discord to Telegram bot is running!'
 
 @app.route('/scrap')
 def scrap():
-    # Example: send a Telegram message to confirm scrap endpoint hit
+    # Forward all collected messages to Telegram, then clear the list
+    global pending_messages
+    if not pending_messages:
+        return jsonify({"status": "success", "message": "No new messages to forward."})
+
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {
-            'chat_id': TELEGRAM_CHANNEL,
-            'text': "🕒 /scrap endpoint triggered by cron job.",
-            'parse_mode': 'HTML'
-        }
-        requests.post(url, data=data)
-        return jsonify({"status": "success", "message": "/scrap triggered"})
+        for msg in pending_messages:
+            if msg['type'] == 'text':
+                send_text_to_telegram(msg['content'])
+            elif msg['type'] == 'photo':
+                send_photo_to_telegram(msg['photo_bytes'], msg['caption'])
+        count = len(pending_messages)
+        pending_messages = []  # Clear after sending
+        return jsonify({"status": "success", "message": f"Forwarded {count} messages."})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -62,28 +70,20 @@ async def on_ready():
     print(f'✅ Bot is online as {client.user}')
     print(f'Listening on Discord Channel ID: {DISCORD_CHANNEL_ID}')
     print(f'Forwarding to Telegram Channel ID: {TELEGRAM_CHANNEL}')
-    
     try:
         send_text_to_telegram(
             "<b>✅ Bot Started Successfully!</b>\n"
-            "🔄 <i>Now forwarding messages from Discord to Telegram.</i>\n"
+            "🔄 <i>Now forwarding messages from Discord to Telegram every 5 minutes.</i>\n"
             f"🎯 <b>Listening on:</b> <code>{DISCORD_CHANNEL_ID}</code>\n"
             f"📢 <b>Target Channel:</b> <code>{TELEGRAM_CHANNEL}</code>"
         )
     except Exception as e:
         print(f"❌ Failed to send Telegram startup message: {e}")
 
-    try:
-        channel = client.get_channel(DISCORD_CHANNEL_ID)
-        if channel:
-            await channel.send("✅ Bot is online and forwarding messages to Telegram!")
-        else:
-            print("❌ Discord channel not found!")
-    except Exception as e:
-        print(f"❌ Failed to send Discord startup message: {e}")
-
 @client.event
 async def on_message(message):
+    global pending_messages
+
     if message.author == client.user:
         return
 
@@ -98,23 +98,24 @@ async def on_message(message):
                     if attachment.content_type and attachment.content_type.startswith('image'):
                         img_bytes = await attachment.read()
                         cap = caption if i == 0 else ""
-                        resp = send_photo_to_telegram(img_bytes, cap)
-                        if resp.status_code != 200:
-                            print(f"❌ Failed to send image: {resp.text}")
+                        pending_messages.append({
+                            'type': 'photo',
+                            'photo_bytes': img_bytes,
+                            'caption': cap
+                        })
                     else:
                         link_text = f"{caption}\n{attachment.url}" if i == 0 and text else attachment.url
-                        resp = send_text_to_telegram(link_text)
-                        if resp.status_code != 200:
-                            print(f"❌ Failed to send file/link: {resp.text}")
+                        pending_messages.append({
+                            'type': 'text',
+                            'content': link_text
+                        })
                 except Exception as e:
                     print(f"❌ Error processing attachment: {e}")
         elif text:
-            try:
-                resp = send_text_to_telegram(caption)
-                if resp.status_code != 200:
-                    print(f"❌ Failed to send text message: {resp.text}")
-            except Exception as e:
-                print(f"❌ Error sending text message: {e}")
+            pending_messages.append({
+                'type': 'text',
+                'content': caption
+            })
 
 def run_flask():
     app.run(host='0.0.0.0', port=PORT)
