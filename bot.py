@@ -10,26 +10,26 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-TELEGRAM_CHANNEL = os.getenv('TELEGRAM_CHANNEL')
+TELEGRAM_CHANNEL = os.getenv('TELEGRAM_CHANNEL')  # Should be like -1001234567890
 DISCORD_CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
 PORT = int(os.getenv('PORT', 10000))
 
-# Flask server to keep container alive
+# Flask app to keep the bot alive on Render.com
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return 'Discord to Telegram bot is running!'
+    return '✅ Discord to Telegram bot is running!'
 
 def run_flask():
     app.run(host='0.0.0.0', port=PORT)
 
-# Discord client setup
+# Setup Discord client
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Telegram forward functions
+# Telegram helpers
 def send_photo_to_telegram(photo_bytes, caption=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     files = {'photo': ('image.jpg', photo_bytes)}
@@ -52,7 +52,29 @@ def send_text_to_telegram(text):
 @client.event
 async def on_ready():
     print(f'✅ Bot is online as {client.user}')
-    print(f'Forwarding messages from Discord Channel ID: {DISCORD_CHANNEL_ID} to Telegram Channel: {TELEGRAM_CHANNEL}')
+    print(f'Listening on Discord Channel ID: {DISCORD_CHANNEL_ID}')
+    print(f'Forwarding to Telegram Channel ID: {TELEGRAM_CHANNEL}')
+    
+    # Telegram startup message
+    try:
+        send_text_to_telegram(
+            "<b>✅ Bot Started Successfully!</b>\n"
+            "🔄 <i>Now forwarding messages from Discord to Telegram.</i>\n"
+            f"🎯 <b>Listening on:</b> <code>{DISCORD_CHANNEL_ID}</code>\n"
+            f"📢 <b>Target Channel:</b> <code>{TELEGRAM_CHANNEL}</code>"
+        )
+    except Exception as e:
+        print(f"❌ Failed to send Telegram startup message: {e}")
+    
+    # Discord startup message
+    try:
+        channel = client.get_channel(DISCORD_CHANNEL_ID)
+        if channel:
+            await channel.send("✅ Bot is online and forwarding messages to Telegram!")
+        else:
+            print("❌ Discord channel not found!")
+    except Exception as e:
+        print(f"❌ Failed to send Discord startup message: {e}")
 
 @client.event
 async def on_message(message):
@@ -88,7 +110,7 @@ async def on_message(message):
             except Exception as e:
                 print(f"❌ Error sending text message: {e}")
 
-# Start Flask in a thread and then start the bot
+# Start Flask + Discord bot
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
     client.run(DISCORD_TOKEN)
